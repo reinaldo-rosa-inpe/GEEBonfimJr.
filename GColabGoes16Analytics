@@ -1,0 +1,316 @@
+import plotly.offline as py
+import plotly.graph_objs as go
+import plotly.express as px
+import plotly.figure_factory as ff
+from plotly.validators.scatter.marker import SymbolValidator
+from datetime import datetime
+from google.colab import data_table
+data_table._DEFAULT_FORMATTERS[float] = lambda x: f"{x:.4f}"
+%matplotlib inline
+# O arquivo handsOnFunctions.py agrupa funções e bibliotecas python usadas nesta pesquisa 
+!gdown --id 1KiQni7w_Q8DbAB4ToOV4y-DW_SyRtOar
+!gdown --id 17KIaoA80EiKfR6IxILcU6VqD51GZOZtt
+%run  'handsOnFunctions.py'
+import warnings
+warnings.filterwarnings('ignore')
+
+# To produce a list whose itens are timeseries from pandas columns
+def makeList(data, npoints):
+  """
+  Produce a list whose itens are timeseries 
+  data    : pandas dataframe with columns beeing timeseries
+  npoints : number to fix 2^n elements for time serie, whether cutting or pad-zeroing elements
+  """
+  lst = []
+  n = len(data.columns) 
+  for i in range(n):
+    ns = len(data.iloc[:,i])
+    # if total values is greater than user specified npoints, cut data at the end
+    if ns >= npoints:
+      lst.append(data.iloc[0:npoints,i].values)
+    # if there are fewer total values than user specified npoints, zero-pad at the end  
+    else: 
+      lst.append(np.pad(data.iloc[:,i].values, (0, npoints - ns%npoints), 'constant')) 
+  return lst
+
+# Get respective detrended for each serie in a list
+def getDetrended(lst, stype):
+  """
+  Get detrended for each timeserie in a list
+  lst    : list whose elements are timeseries
+  stype  : a label describing the timeserie
+  """
+  for i in range(len(lst)):
+    serie =  pd.Series(lst[i])
+    seriesList.append(detrended(serie))
+    stype.append('detrended-' + stype[i])
+  return seriesList, stype
+  
+# Gaussian x Non-Gaussian (The Kullen-Frey Parameter Space)
+def cullenfreyPlotly(A, params):
+    """
+    A: a unique serie to ajust GEV area extension in the graph
+    params: a dataframe that contains kurtosis, Skewness² and type for each timeserie
+    """
+    A = clearBySigma(A, 3)
+    m=np.mean(A)
+    std=np.std(A)
+    s=skew(A)
+    k1=kurtosis(A)
+    k2=k1+3
+    # Cullen-Frey params
+    ss=s*s
+    k=k2
+
+    maior = max(abs(A))
+    polyX1 = params.loc[:,'skewness'].max() if maior > 4.4 else 4.4
+    polyY1 = polyX1 + 1
+    polyY2 = 3/2.*polyX1 + 3
+    ylim = polyY2 if polyY2 > 5 else 5
+    if maior > 1:
+      ylim =  params.loc[:,'kurtosis'].max()
+    x = [0, polyX1, polyX1, 0]
+    y = [1, polyY1, polyY2, 3]
+
+    fig = px.scatter(params, x="skewness", y="kurtosis", color="type", template='gridon')
+    # Add traces
+    fig.add_trace(go.Scatter(x = x, y= y, mode="lines", opacity=0.3,
+                             fill="toself", line = dict(color='white'),
+                             fillcolor="RoyalBlue", showlegend = False))
+    fig.add_trace(go.Scatter(x= [0], y=[3], mode='markers',
+                             marker_symbol= 'triangle-up', marker_color="magenta", name='Gaussian'))
+    fig.add_trace(go.Scatter(x= [ss], y=[k], mode='markers',
+                             marker_symbol= 'circle', marker_color="black", name='Cleaned Serie'))
+    fig.add_trace(go.Scatter(x= [4], y=[9], mode='markers',
+                             marker_symbol= 'square', marker_color="black", name='Exponential'))
+    fig.add_trace(go.Scatter(x= [0], y=[4.187999875999753], mode='markers',
+                             marker_symbol= 'cross', marker_color="black", name='Logistic'))
+    fig.add_trace(go.Scatter(x= [0], y=[1.7962675925351856], mode='markers',
+                             marker_symbol= 'star', marker_color="black", name='Uniform'))
+    fig.add_trace(go.Scatter(x= np.arange(0, polyX1, 0.1),
+                             y= 3/2. * np.arange(0, polyX1, 0.1) + 3, mode='lines',
+                             line=dict(color='black'), name='Gamma'))
+    fig.add_trace(go.Scatter(x= np.arange(0, polyX1, 0.1),
+                             y= 2 * np.arange(0, polyX1, 0.1) + 3, mode='lines',
+                             line=dict(color='black', dash='dashdot'), name='Lognormal'))
+    fig.update_traces(marker=dict(size=10))
+    fig.update_layout( title={'text': "Cullen and Frey Parameter Space", 
+                              'y':0.85, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
+                       xaxis_title="Skewness²", yaxis_title="Kurtosis" )
+    fig.update_xaxes(range=[-0.1, polyX1 + 0.1])                
+    fig.update_yaxes(range=[ylim + 0.1, -0.1])
+    fig.show()
+    
+    import math
+import time
+# starting time
+start = time.time()
+# LSTM for timeseries with regression framing
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+import timeit
+
+# Convert an array of values into a dataset matrix
+def create_dataset(dataset, look_back=1):
+	dataX, dataY = [], []
+	for i in range(len(dataset)-look_back-1):
+		a = dataset[i:(i+look_back), 0]
+		dataX.append(a)
+		dataY.append(dataset[i + look_back, 0])
+	return np.array(dataX), np.array(dataY)
+ 
+# Simple plot for LSTM results
+def plotLSTMresults(dataset, trainPredictPlot, testPredictPlot, history):
+  """
+  dataset          : original timeserie
+  trainPredictPlot : training timeserie
+  testPredictPlot  : testing timeserie
+  history          : Keras LSTM history object
+  """
+  # plot baseline and predictions
+  fig, ax = plt.subplots(figsize=(10.5,6))
+  ax.plot(dataset, label='Original serie')
+  ax.plot(trainPredictPlot, label='Training serie')
+  ax.plot(testPredictPlot, label='Testing serie')
+  ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.2), fancybox=True, shadow=True, ncol=3)
+  plt.xlabel("Time Serie (t)")
+  plt.ylabel("Frequency")
+  plt.title("Timeserie predictions using LSTM")
+  plt.show()
+  # summarize history for accuracy
+  fig , (ax2) = plt.subplots(figsize=(10.5,4.5))
+  fig.suptitle('Model Metrics')
+  #ax1.plot(history.history['accuracy'])
+  #ax1.set_ylabel('Accuracy') 
+  ax2.plot(history.history['loss'])
+  ax2.set_ylabel('Loss')
+  #plt.legend(['train', 'test'], loc='upper right')
+  plt.xlabel("Epoch")
+  plt.show()  
+  
+def genericLSTM(df, bs, nepochs, look_back, neurons, mapfunc, nseed):
+  """
+  df : dataframe containing timeserie to apply prediction
+  bs : number of elements in each subset
+  nepochs : number of times to execute model training 
+  look_back : timestep representing sequence observations steps of interest
+  neurons : number of neurons at first hidden layer
+  mapfunc : mapping function 
+  nseed : fixed number as random seed for reproducibility
+  """
+  np.random.seed(nseed)
+  # convert the dataframe to numpy.array
+  dataset = df.values
+  dataset = df.astype('float32')
+  # normalize the dataset
+  scaler = MinMaxScaler(feature_range=(0, 1))
+  dataset = scaler.fit_transform(dataset)
+
+  # split into train and test sets
+  train_size = int(len(dataset) * 0.67)
+  test_size = len(dataset) - train_size
+  train, test = dataset[0:train_size,:], dataset[train_size:len(dataset),:]
+  # reshape into X=t and Y=t+1
+  trainX, trainY = create_dataset(train, look_back)
+  testX, testY = create_dataset(test, look_back)
+  # reshape input to be [samples, time steps, features]
+  trainX = np.reshape(trainX, (trainX.shape[0], 1, trainX.shape[1]))
+  testX = np.reshape(testX, (testX.shape[0], 1, testX.shape[1]))
+
+  # create and fit the LSTM network
+  model = Sequential()
+  model.add(LSTM(neurons, activation=mapfunc,  return_sequences=True, input_shape=(1, look_back)))
+  model.add(LSTM(neurons, activation=mapfunc))
+  model.add(Dense(1))
+  model.compile(loss='mean_squared_error', optimizer='adam', metrics=['accuracy'])
+  history = model.fit(trainX, trainY, epochs=nepochs, batch_size=bs, verbose=0)
+  #history = model.fit(trainX, trainY, validation_split=0.33, epochs=nepochs, batch_size=bs, verbose=0)
+
+  # make predictions
+  trainPredict = model.predict(trainX)
+  testPredict = model.predict(testX)
+  # invert predictions
+  trainPredict = scaler.inverse_transform(trainPredict)
+  trainY = scaler.inverse_transform([trainY])
+  testPredict = scaler.inverse_transform(testPredict)
+  testY = scaler.inverse_transform([testY])
+
+  # calculate root mean squared error
+  trainScore = math.sqrt(mean_squared_error(trainY[0], trainPredict[:,0]))
+  print('Train Score: %.2f RMSE' % (trainScore))
+  testScore = math.sqrt(mean_squared_error(testY[0], testPredict[:,0]))
+  print('Test Score: %.2f RMSE' % (testScore))
+
+  # shift train predictions for plotting
+  trainPredictPlot = np.empty_like(dataset)
+  trainPredictPlot[:, :] = np.nan
+  trainPredictPlot[look_back:len(trainPredict)+look_back, :] = trainPredict
+  # shift test predictions for plotting
+  testPredictPlot = np.empty_like(dataset)
+  testPredictPlot[:, :] = np.nan
+  testPredictPlot[len(trainPredict)+(look_back*2)+1:len(dataset)-1, :] = testPredict
+
+  end = time.time()
+  print(f"Runtime of the program is {end - start} seconds")
+  return {"train_score": trainScore, "test_score": testScore, "program_runtime": (end - start)}, [trainPredictPlot, testPredictPlot], history, model
+  # program body ends
+  
+  # Reading data, setting an index (datetime) and fixing other collumn names
+dateparse = lambda x: datetime.strptime(x, '%d/%m/%Y %H%M')
+df = pd.read_csv('DATASET_OUT2018.csv',  parse_dates={'datetime': ['Data', 'Horario']}, date_parser=dateparse)
+df.index = df['datetime']
+df.columns = df.columns.str.lower().str.replace(' ', '')
+# Extract information to further group the data 
+df['day'] = df.datetime.dt.day
+df['hour'] = df.datetime.dt.hour
+# Droping unecessary collumns (rowid) and showing the data
+df.drop(df.columns[[1]], axis=1, inplace=True)
+cols = [col for col in df.columns if col not in ["latitude","longitude","day","hour"]]
+data_table.DataTable(df[cols], include_index=False, num_rows_per_page=10)
+
+fig = px.scatter_geo(df, lat=df.latitude, lon=df.longitude, hover_name="estacao", color =df.estacao, scope = 'south america')
+fig.show()
+
+cols_plot = ['banda1', 'banda6', 'banda7', 'banda16']
+bands = ['banda1', 'banda2', 'banda3', 'banda4', 'banda5', 'banda6', 'banda7', 'banda8',
+         'banda9', 'banda10', 'banda11', 'banda12','banda13', 'banda14', 'banda15', 'banda16']
+axes = df[cols_plot].plot(marker='.', alpha=0.5, linestyle='-', figsize=(11, 9), subplots=True)
+for ax in axes:
+    ax.set_ylabel('Frequency')
+    
+df.plot(x="estacao", y=range(4, 20), figsize=(11, 9), ylabel = "Frequency", style='.');
+
+df.plot(x="estacao", y=range(4, 20), figsize=(11, 9), ylabel = "Frequency", style='.');
+
+# Number of occurrences for each hour
+print("Seguem as horas do dia que imagens foram realizadas e a  quantidade de amostras para cada hora: \n", df['hour'].value_counts())
+# Stations have different amount of data
+#df['estacao'].value_counts()
+print("\nHá " + str(len(df['estacao'].unique())) + " estações de imageamento de nuvens!")
+
+
+#df.loc['2018-10-01 12:00':'2018-10-31 12:00', 'banda4'].plot(figsize=(11,4), ylabel = "Frequency", marker='.', linestyle='-');
+fig = px.line(df, x='datetime', y="banda4")
+fig.show()
+
+df_daily_mean = df.iloc[:, 4:20].resample("1d").mean()
+data_table.DataTable(df_daily_mean, include_index=False, num_rows_per_page=10)
+
+df.iloc[:, 4:10].resample("1d").mean().plot(figsize=(11,4), ylabel = "Frequency");
+
+#fig = ff.create_distplot([df.banda3.to_numpy()], ["banda3"], show_rug=False)
+#fig.show()
+kwargs = dict(hist_kws={'alpha':.5, 'edgecolor':'black'}, kde_kws={'linewidth':2, 'shade':True})
+sns.distplot(df[['banda3']], bins=50, color="dodgerblue", hist=True, label="banda3", **kwargs);
+sns.distplot(clearBySigma(df[['banda3']], 3), bins=50, color="orange", hist=True, label="banda3_cleaned", **kwargs);
+plt.ylabel('Frequency per bin'); plt.xlabel('Bins')
+
+#fig = ff.create_distplot([df_daily_mean.banda3.to_numpy()], ["banda3"], show_rug=False)
+#fig.show()
+sns.distplot(df_daily_mean[['banda3']], bins=50, color="dodgerblue", hist=True, label="banda3", **kwargs);
+plt.ylabel('Frequency per bin'); plt.xlabel('Bins')
+
+df.iloc[:, 10:20].resample("1d").mean().plot(figsize=(11,4), ylabel = "Frequency");
+
+sns.distplot(df[['banda13']], bins=50, color="dodgerblue", hist=True, label="banda13", **kwargs);
+sns.distplot(clearBySigma(df[['banda13']], 3), bins=50, color="orange", hist=True, label="banda13_cleaned", **kwargs);
+plt.ylabel('Frequency of A per bin'); plt.xlabel('Bins')
+
+sns.distplot(df_daily_mean[['banda13']], bins=50, color="dodgerblue", hist=True, label="banda13", **kwargs);
+plt.ylabel('Frequency per bin'); plt.xlabel('Bins')
+
+fig = px.scatter(df, x="datetime", y="banda16", color="estacao", title="Time series for specific band");
+fig.update_traces(mode="markers", hovertemplate=None)
+fig.update_layout(hovermode="y"); fig.show()
+
+#To classify in the Cullen-Frey Graph and to generate the respective histograms
+
+# In case its necessary to normalize all series create a scaler object, so fit and transform the data
+scaler = MinMaxScaler()
+dfnorm = pd.DataFrame(scaler.fit_transform(df[bands]), columns=df[bands].columns)
+# Create a list with each timeserie band
+seriesList = makeList(dfnorm, len(dfnorm['banda1']))
+bandParams = getCFparams(seriesList, bands)
+data_table.DataTable(bandParams, include_index=False, num_rows_per_page=10)
+
+#maxIndex = np.argmax(bandParams['kurtosis'])
+#cullenfrey(seriesList[maxIndex], bandParams)
+#seriesList = makeList(df, len(df['banda1'])) # Descomente esta linha para o gráfico abranger todas as séries temporais
+maxIndex = np.argmax(bandParams['kurtosis'])
+cullenfreyPlotly(seriesList[maxIndex], bandParams)
+
+seriesList = makeList(df, len(df['banda1'])) # Descomente esta linha para o gráfico abranger todas as séries temporais
+maxIndex = np.argmax(bandParams['kurtosis'])
+cullenfreyPlotly(seriesList[maxIndex], bandParams)
+
+bandseries = [df.banda9.to_numpy(), df.banda10.to_numpy(), df.banda11.to_numpy(), df.banda13.to_numpy(),
+              df.banda14.to_numpy(), df.banda15.to_numpy(), df.banda16.to_numpy()]
+names = ["banda9", "banda10", "banda11", "banda13", "banda14", "banda15", "banda16"]
+#bandseries = [df.banda3.to_numpy()]; names = ["banda3"]
+fig = ff.create_distplot(bandseries, names, show_rug=True); fig.show()
+
+
+    
